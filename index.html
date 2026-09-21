@@ -24,6 +24,8 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="shortcut icon" href="favicon.ico">
 
 <style>
 :root{
@@ -309,7 +311,7 @@ tr.row-self{background:rgba(212,175,55,.08);}
       <button id="btn-new-game" class="btn btn-primary btn-large">Commencer</button>
       <button id="btn-continue" class="btn btn-secondary btn-large" style="display:none;">📂 Charger une partie</button>
     </div>
-    <p class="launch-version">v1.0 — Saison 2026/2027 · Promotions/relégations · Compétitions continentales (LDC, Libertadores...) · Classements vivants</p>
+    <p class="launch-version">v1.4 — Onglet Sponsors : équipementiers réels, négociation d'augmentation, résiliation · Carrière & équipes nationales · Messagerie IA</p>
   </div>
 </div>
 
@@ -1041,7 +1043,8 @@ const DB = {
 const Game = {
   state: null,
 
-  newGame(club) {
+  newGame(club, opts) {
+    opts = opts || {};
     DB.init.call(DB); // idempotent
     const country = DB.country(club.pays_code);
     const league = DB.league(club.ligue);
@@ -1049,7 +1052,8 @@ const Game = {
     const youth = Generators.generateYouth(club, country);
     const stadiumReal = DB.stadiumFor(club);
 
-    const seasonStart = "2026-08-15";
+    const seasonStart = opts.seasonStart || "2026-08-15";
+    const seasonNum = opts.season || 2026;
     const leagueClubs = DB.clubsInLeague(club.ligue).map(c => c.id);
     const leagueCalendar = Generators.generateRoundRobin(leagueClubs, seasonStart, league.nom, league.ligue || league.id, 6);
 
@@ -1064,8 +1068,8 @@ const Game = {
       clubId: club.id,
       countryCode: club.pays_code,
       leagueId: club.ligue,
-      season: 2026,
-      seasonLabel: "2026/2027",
+      season: seasonNum,
+      seasonLabel: seasonNum + '/' + (seasonNum + 1),
       currentDate: seasonStart,
       budget: ceInitialBudget(league.niveau),
       masseSalarialeCap: null,
@@ -1089,14 +1093,20 @@ const Game = {
       cupCalendars: {},       // cupName -> matches[]
       standings: {},          // leagueId -> computed on demand
       objectives: ceGenerateObjectives(league),
-      news: [{ id: "n0", date: seasonStart, type: "info", titre: "Bienvenue à " + club.nom + " !", corps: (sessionMgr && sessionMgr.prenom ? sessionMgr.prenom + " " + sessionMgr.nomFamille : "Vous") + " prend officiellement les commandes du club pour la saison 2026/2027. Bonne chance, " + (sessionMgr && sessionMgr.prenom ? sessionMgr.prenom : "manager") + " !" }],
+      news: [{ id: "n0", date: seasonStart, type: "info", titre: "Bienvenue à " + club.nom + " !", corps: (sessionMgr && sessionMgr.prenom ? sessionMgr.prenom + " " + sessionMgr.nomFamille : "Vous") + " prend officiellement les commandes du club pour la saison " + seasonNum + "/" + (seasonNum + 1) + ". Bonne chance, " + (sessionMgr && sessionMgr.prenom ? sessionMgr.prenom : "manager") + " !" }],
       notifications: [{ id: "note0", date: seasonStart, texte: "Nouvelle saison lancée pour " + club.nom + ".", lu: false }],
       statsHistory: [],
       loans: [],
       palmares: [],
       seasonHistory: [],
       transferOffers: [],
-      opponentSquadCache: {}
+      managerSalaire: opts.managerSalaire || ceManagerSalary(league.niveau),
+      offenses: 0,
+      offresEmploi: [],
+      natPalmares: [],
+      clubHistory: [],
+      opponentSquadCache: {},
+      sponsors: { contracts: [], offers: [] }
     };
     this.state.calendars[club.ligue] = leagueCalendar;
     if (cupCalendar.length) this.state.cupCalendars[cupName] = cupCalendar;
@@ -1113,6 +1123,7 @@ const Game = {
       if (saved.leagueAssign) for (const cid in saved.leagueAssign) ceSetClubLeague(cid, saved.leagueAssign[cid]);
       this.applyStarRatings();
       this.applyContractSystem();
+      Sponsors.normalize();
       return true;
     }
     return false;
@@ -1123,7 +1134,7 @@ const Game = {
     for (const p of this.state.squad) {
       p.valeur = cePlayerValue(p.note, p.age, p.potentiel || p.note);
       p.salaire = cePlayerSalary(p.valeur);
-      if (!p.contratFin) p.contratFin = 2027 + Math.floor(Math.random() * 4);
+      if (!p.contratFin) p.contratFin = ((this.state && this.state.season) ? this.state.season : 2026) + 1 + Math.floor(Math.random() * 4);
     }
     if (this.state.stadium && this.state.stadium.prixMoyenBillet < 52) this.state.stadium.prixMoyenBillet = 52;
     if (!this.state.loans) this.state.loans = [];
@@ -1239,6 +1250,7 @@ const Game = {
     const lvl = Game.league().niveau;
     const tv = lvl === 1 ? 7500000 : lvl === 2 ? 2800000 : lvl === 3 ? 500000 : 250000;
     this.addFinance("Droits TV & sponsors", tv);
+    Sponsors.payMonthly();
     // alertes de fin de contrat
     for (const p of s.squad) {
       if (p.warnExpire || p.demandeHausse) continue;
@@ -1869,6 +1881,9 @@ const Matches = {
       match.competition + (match.journee ? " — Journée " + match.journee : match.tour ? " — " + match.tour : "") + ". " + (isHome ? "À domicile" : "À l'extérieur") + ", score final : " + scoreTxt + ".");
     Game.addNotification(outcome + " " + scoreTxt + " contre " + opp.nom);
 
+    // primes de victoire des sponsors
+    if (outcome === "Victoire") Sponsors.payWinBonuses();
+
     // stats mensuelles (joueur du mois)
     this._recordMonthStats(match, result);
 
@@ -2212,6 +2227,347 @@ const Finances = {
   }
 };
 
+// ============================================================
+// sponsors.js — Sponsors réels (v1.3) : marques, notoriété, offres
+// Plus une marque est connue (étoiles), plus elle paie... mais les
+// géants (Nike, Emirates...) ne signent qu'avec des clubs prestigieux.
+// ============================================================
+const SPONSOR_BRANDS = [
+  // Équipementier
+  { nom: 'Nike', cat: 'Équipementier', stars: 4 },
+  { nom: 'Adidas', cat: 'Équipementier', stars: 4 },
+  { nom: 'Puma', cat: 'Équipementier', stars: 3 },
+  { nom: 'New Balance', cat: 'Équipementier', stars: 3 },
+  { nom: 'Under Armour', cat: 'Équipementier', stars: 2 },
+  { nom: 'Umbro', cat: 'Équipementier', stars: 2 },
+  { nom: 'Kappa', cat: 'Équipementier', stars: 2 },
+  { nom: 'Macron', cat: 'Équipementier', stars: 1 },
+  { nom: 'Joma', cat: 'Équipementier', stars: 1 },
+  { nom: 'Hummel', cat: 'Équipementier', stars: 1 },
+  { nom: 'Lotto', cat: 'Équipementier', stars: 1 },
+  { nom: 'Errea', cat: 'Équipementier', stars: 1 },
+  // Compagnie aérienne
+  { nom: 'Emirates', cat: 'Compagnie aérienne', stars: 4 },
+  { nom: 'Qatar Airways', cat: 'Compagnie aérienne', stars: 4 },
+  { nom: 'Etihad Airways', cat: 'Compagnie aérienne', stars: 3 },
+  { nom: 'Turkish Airlines', cat: 'Compagnie aérienne', stars: 3 },
+  { nom: 'Lufthansa', cat: 'Compagnie aérienne', stars: 2 },
+  { nom: 'Ryanair', cat: 'Compagnie aérienne', stars: 2 },
+  { nom: 'Air France', cat: 'Compagnie aérienne', stars: 2 },
+  // Boissons
+  { nom: 'Coca-Cola', cat: 'Boissons', stars: 4 },
+  { nom: 'Pepsi', cat: 'Boissons', stars: 4 },
+  { nom: 'Red Bull', cat: 'Boissons', stars: 3 },
+  { nom: 'Heineken', cat: 'Boissons', stars: 3 },
+  { nom: 'Monster Energy', cat: 'Boissons', stars: 2 },
+  { nom: 'Carlsberg', cat: 'Boissons', stars: 2 },
+  { nom: 'Budweiser', cat: 'Boissons', stars: 2 },
+  // Technologie
+  { nom: 'Samsung', cat: 'Technologie', stars: 4 },
+  { nom: 'Sony', cat: 'Technologie', stars: 3 },
+  { nom: 'Microsoft', cat: 'Technologie', stars: 3 },
+  { nom: 'Rakuten', cat: 'Technologie', stars: 2 },
+  { nom: 'TCL', cat: 'Technologie', stars: 2 },
+  { nom: 'Xiaomi', cat: 'Technologie', stars: 2 },
+  { nom: 'Philips', cat: 'Technologie', stars: 2 },
+  // Banque & paiement
+  { nom: 'Visa', cat: 'Banque & paiement', stars: 4 },
+  { nom: 'Mastercard', cat: 'Banque & paiement', stars: 4 },
+  { nom: 'Santander', cat: 'Banque & paiement', stars: 3 },
+  { nom: 'Standard Chartered', cat: 'Banque & paiement', stars: 3 },
+  { nom: 'Barclays', cat: 'Banque & paiement', stars: 2 },
+  { nom: 'Deutsche Bank', cat: 'Banque & paiement', stars: 2 },
+  { nom: 'ING', cat: 'Banque & paiement', stars: 1 },
+  { nom: 'Crédit Agricole', cat: 'Banque & paiement', stars: 1 },
+  // Automobile
+  { nom: 'Mercedes-Benz', cat: 'Automobile', stars: 4 },
+  { nom: 'Audi', cat: 'Automobile', stars: 3 },
+  { nom: 'BMW', cat: 'Automobile', stars: 3 },
+  { nom: 'Chevrolet', cat: 'Automobile', stars: 2 },
+  { nom: 'Jeep', cat: 'Automobile', stars: 2 },
+  { nom: 'Renault', cat: 'Automobile', stars: 2 },
+  { nom: 'Kia', cat: 'Automobile', stars: 1 },
+  { nom: 'Nissan', cat: 'Automobile', stars: 1 },
+  // Restauration
+  { nom: "McDonald's", cat: 'Restauration', stars: 3 },
+  { nom: 'Burger King', cat: 'Restauration', stars: 2 },
+  { nom: 'KFC', cat: 'Restauration', stars: 2 },
+  { nom: 'Subway', cat: 'Restauration', stars: 2 },
+  { nom: "Domino's Pizza", cat: 'Restauration', stars: 1 },
+  { nom: 'Pizza Hut', cat: 'Restauration', stars: 1 }
+];
+
+
+// ---------- Équipementiers réels (v1.4) ----------
+const CLUB_KITS = {
+  // Espagne
+  'Real Madrid': 'Adidas', 'FC Barcelone': 'Nike', 'Atlético Madrid': 'Nike', 'Sevilla': 'Nike',
+  'Valencia': 'Puma', 'Villarreal': 'Joma', 'Espanyol': 'Joma',
+  // Angleterre
+  'Manchester City': 'Puma', 'Manchester United': 'Adidas', 'Liverpool': 'Nike', 'Arsenal': 'Adidas',
+  'Chelsea': 'Nike', 'Tottenham Hotspur': 'Nike', 'Newcastle United': 'Adidas', 'Aston Villa': 'Adidas',
+  'West Ham United': 'Umbro', 'Everton': 'Hummel', 'Nottingham Forest': 'Adidas', 'Sunderland': 'Nike',
+  'Fulham': 'Adidas', 'Brentford': 'Umbro', 'Crystal Palace': 'Macron', 'Wolverhampton Wanderers': 'Adidas',
+  'AFC Bournemouth': 'Umbro', 'Brighton & Hove Albion': 'Nike',
+  // Allemagne
+  'FC Bayern Munich': 'Adidas', 'Borussia Dortmund': 'Puma', 'RB Leipzig': 'Nike', 'Eintracht Frankfurt': 'Nike',
+  // Italie
+  'Juventus': 'Adidas', 'AC Milan': 'Puma', 'Inter Milan': 'Nike', 'AS Roma': 'Adidas',
+  'Torino': 'Joma', 'Bologna': 'Macron',
+  // France
+  'Paris Saint-Germain': 'Nike', 'Olympique de Marseille': 'Puma', 'AS Monaco': 'Kappa',
+  'RC Lens': 'Puma', 'Olympique Lyonnais': 'New Balance', 'AS Saint-Étienne': 'Hummel',
+  // Portugal
+  'FC Porto': 'New Balance', 'SL Benfica': 'Nike', 'Sporting CP': 'Nike',
+  // Pays-Bas
+  'AFC Ajax': 'Adidas', 'PSV Eindhoven': 'Puma', 'Feyenoord Rotterdam': 'Kappa',
+  // Écosse
+  'Celtic FC': 'Nike', 'Rangers FC': 'Adidas',
+  // Turquie
+  'Galatasaray SK': 'Nike', 'Fenerbahçe SK': 'Umbro', 'Beşiktaş JK': 'Adidas',
+  // Amériques
+  'Clube de Regatas do Flamengo': 'Adidas', 'Sociedade Esportiva Palmeiras': 'Puma',
+  'Sport Club Corinthians Paulista': 'Nike', 'Grêmio Foot-Ball Porto Alegrense': 'Umbro',
+  'River Plate': 'Adidas', 'Boca Juniors': 'Adidas',
+  // Divers
+  'Inter Miami CF': 'Adidas', 'Malmö FF': 'Puma', 'RSC Anderlecht': 'Joma'
+};
+
+// Équipementier d'un club : réel si connu, sinon déterministe et cohérent avec le niveau
+function ceKitBrandFor(club, niveau) {
+  if (CLUB_KITS[club.nom]) return CLUB_KITS[club.nom];
+  let h = 0;
+  const k = club.id + '|' + club.nom;
+  for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+  const pools = {
+    1: ['Puma', 'New Balance', 'Under Armour', 'Umbro', 'Kappa', 'Macron', 'Joma'],
+    2: ['Umbro', 'Kappa', 'Under Armour', 'Macron', 'Joma', 'Hummel', 'Lotto', 'Errea'],
+    3: ['Macron', 'Joma', 'Hummel', 'Lotto', 'Errea'],
+    4: ['Errea', 'Joma', 'Hummel', 'Lotto']
+  };
+  const pool = pools[niveau] || pools[4];
+  return pool[h % pool.length];
+}
+
+const Sponsors = {
+  MAX_CONTRACTS: 3,
+  MAX_OFFERS: 4,
+
+  normalize() {
+    const s = Game.state;
+    if (!s) return;
+    if (!s.sponsors || typeof s.sponsors !== 'object') s.sponsors = { contracts: [], offers: [] };
+    if (!Array.isArray(s.sponsors.contracts)) s.sponsors.contracts = [];
+    if (!Array.isArray(s.sponsors.offers)) s.sponsors.offers = [];
+    // v1.4 : équipementier réel du club dès le premier lancement / changement de club
+    if (!s.sponsors.kitDone) {
+      s.sponsors.kitDone = true;
+      if (!s.sponsors.kitOff && !s.sponsors.contracts.some(c => c.cat === 'Équipementier')) this.assignKit();
+    }
+    // migration des sauvegardes créées avant la v1.3 : premières offres
+    if (!s.sponsors.seeded && s.sponsors.offers.length === 0) {
+      s.sponsors.seeded = true;
+      this.generateOffers(2);
+    }
+    // identifiants stables pour les contrats
+    for (const c of s.sponsors.contracts) {
+      if (!c.id) c.id = 'ctr_' + Date.now() + '_' + Math.floor(Math.random() * 99999);
+    }
+  },
+
+  // Le club démarre avec son véritable équipementier sous contrat
+  assignKit() {
+    const s = Game.state;
+    const club = Game.club();
+    if (!club) return;
+    const league = Game.league();
+    const b = SPONSOR_BRANDS.find(x => x.nom === ceKitBrandFor(club, league ? (league.niveau || 3) : 3)) || SPONSOR_BRANDS[8];
+    const mensuel = Math.max(15000, Math.round(90000 * Math.pow(b.stars, 1.35) * Math.pow(this.prestige() / 1.6, 1.9) / 1000) * 1000);
+    s.sponsors.contracts.push({
+      id: 'ctr_' + Date.now() + '_kit',
+      marque: b.nom, cat: 'Équipementier', stars: b.stars,
+      mensuel: mensuel,
+      bonusSignature: 0,
+      primeVictoire: Math.round(mensuel * 0.1),
+      saisons: 2,
+      kit: true
+    });
+    Game.addNews('contrat', '🎽 Équipementier : ' + b.nom, club.nom + ' est sous contrat avec ' + b.nom + ' (' + b.stars + '★) : ' + ceFormatMoney(mensuel) + '/mois et ' + ceFormatMoney(Math.round(mensuel * 0.1)) + ' de prime par victoire, pour 2 saisons. Gérez vos partenaires dans l\'onglet 🤝 Sponsors.');
+  },
+
+  // Demander une augmentation (1 fois / 45 jours, dépend des résultats)
+  askRaise(id) {
+    const s = Game.state, sp = s.sponsors;
+    const c = sp.contracts.find(x => x.id === id);
+    if (!c) return null;
+    if (c.lastRaiseAsk) {
+      const j = Math.round((new Date(s.currentDate) - new Date(c.lastRaiseAsk)) / 86400000);
+      if (j < 45) return { marque: c.marque, refus: true, raison: 'cooldown', jours: 45 - j };
+    }
+    c.lastRaiseAsk = s.currentDate;
+    // forme : taux de victoires sur les 8 derniers matchs
+    const past = Matches.getPastMatches().slice(0, 8);
+    let wins = 0;
+    for (const m of past) {
+      const isHome = m.home === s.clubId;
+      const my = isHome ? m.homeGoals : m.awayGoals, opp = isHome ? m.awayGoals : m.homeGoals;
+      if (my > opp) wins++;
+    }
+    const winRate = past.length ? wins / past.length : 0.45;
+    // valeur "juste" du marché pour cette marque
+    const stars = c.stars || 2;
+    const fair = Math.max(15000, Math.round(90000 * Math.pow(stars, 1.35) * Math.pow(this.prestige() / 1.6, 1.9) / 1000) * 1000);
+    let chance = 0.25 + winRate * 0.45 + Math.max(-0.25, (fair / Math.max(1, c.mensuel) - 1) * 0.35);
+    chance = Math.max(0.05, Math.min(0.9, chance));
+    if (Math.random() < chance) {
+      const hausse = 0.12 + Math.random() * 0.15;
+      const avant = c.mensuel;
+      c.mensuel = Math.round(c.mensuel * (1 + hausse));
+      c.primeVictoire = Math.round((c.primeVictoire || 0) * (1 + hausse));
+      Game.addNews('contrat', '📈 ' + c.marque + ' accepte la revalorisation !', 'Bonne nouvelle : ' + c.marque + ' (' + c.cat + ') accepte d\'augmenter son soutien à ' + ceFormatMoney(c.mensuel) + '/mois (contre ' + ceFormatMoney(avant) + ' auparavant). La prime de victoire grimpe à ' + ceFormatMoney(c.primeVictoire) + '.');
+      Game.addNotification('📈 ' + c.marque + ' augmente son sponsoring');
+      return { marque: c.marque, ok: true, avant: avant, apres: c.mensuel };
+    }
+    Game.addNews('info', '😐 ' + c.marque + ' refuse la revalorisation', 'Les négociations avec ' + c.marque + ' n\'aboutissent pas : la marque juge le montant actuel (' + ceFormatMoney(c.mensuel) + '/mois) bien positionné. Retentez votre chance dans 45 jours, idéalement après une bonne série de résultats.');
+    return { marque: c.marque, refus: true, raison: 'refus' };
+  },
+
+  // Résilier un contrat (indemnité = 3 mois de revenus)
+  terminate(id) {
+    const s = Game.state, sp = s.sponsors;
+    const c = sp.contracts.find(x => x.id === id);
+    if (!c) return null;
+    const indemnite = c.mensuel * 3;
+    sp.contracts = sp.contracts.filter(x => x.id !== id);
+    if (c.kit) sp.kitOff = true;
+    Game.addFinance('Indemnité résiliation : ' + c.marque, -indemnite);
+    Game.addNews('transfert', '🚪 Fin du contrat avec ' + c.marque, 'Le contrat ' + c.cat.toLowerCase() + ' avec ' + c.marque + ' est résilié. Indemnité versée : ' + ceFormatMoney(indemnite) + '. L\'emplacement est désormais libre pour un nouveau partenaire — consultez les offres dans l\'onglet 🤝 Sponsors.');
+    Game.addNotification('🚪 Contrat ' + c.marque + ' résilié');
+    return { indemnite: indemnite };
+  },
+
+  // Le prestige du club conditionne les marques intéressées
+  prestige() {
+    const lg = Game.league();
+    const lvl = lg ? (lg.niveau || 3) : 3;
+    let p = lvl === 1 ? 3.4 : lvl === 2 ? 2.4 : lvl === 3 ? 1.7 : 1.2;
+    p += Math.min(0.8, (Game.state.palmares || []).length * 0.1);
+    return Math.min(4.4, p);
+  },
+
+  seedInitial() {
+    Game.state.sponsors.seeded = true;
+    this.generateOffers(2, true);
+  },
+
+  generateOffers(n, silent) {
+    this.normalize();
+    const sp = Game.state.sponsors;
+    const used = new Set(sp.contracts.map(c => c.marque).concat(sp.offers.map(o => o.marque)));
+    const cats = new Set(sp.contracts.map(c => c.cat));
+    const prestige = this.prestige();
+    const gen = [];
+    let guard = 0;
+    while (n > 0 && guard++ < 80) {
+      const b = SPONSOR_BRANDS[Math.floor(Math.random() * SPONSOR_BRANDS.length)];
+      if (used.has(b.nom) || cats.has(b.cat)) continue;
+      if (b.stars === 4 && prestige < 3.2) continue;
+      if (b.stars === 3 && prestige < 2.1) continue;
+      if (b.stars === 2 && prestige < 1.4) continue;
+      const vari = 0.85 + Math.random() * 0.3;
+      const mensuel = Math.max(15000, Math.round(90000 * Math.pow(b.stars, 1.35) * Math.pow(prestige / 1.6, 1.9) * vari / 1000) * 1000);
+      const offre = {
+        id: 'sp' + Date.now() + '_' + Math.floor(Math.random() * 99999),
+        marque: b.nom, cat: b.cat, stars: b.stars,
+        mensuel: mensuel,
+        bonusSignature: Math.round(mensuel * (2 + Math.random() * 2)),
+        primeVictoire: Math.round(mensuel * (0.08 + Math.random() * 0.07)),
+        duree: 1 + Math.floor(Math.random() * 3)
+      };
+      sp.offers.push(offre);
+      used.add(b.nom);
+      gen.push(offre);
+      n--;
+    }
+    if (sp.offers.length > this.MAX_OFFERS) sp.offers = sp.offers.slice(-this.MAX_OFFERS);
+    if (!silent) {
+      for (const o of gen) {
+        Game.addNews('info', '🤝 Nouvelle offre sponsor : ' + o.marque, o.marque + ' (' + o.cat + ') vous propose ' + ceFormatMoney(o.mensuel) + '/mois, un bonus de signature de ' + ceFormatMoney(o.bonusSignature) + ' et ' + ceFormatMoney(o.primeVictoire) + ' de prime par victoire, pour ' + o.duree + ' saison' + (o.duree > 1 ? 's' : '') + '. Répondez depuis l\'onglet 🤝 Sponsors.');
+        Game.addNotification('🤝 Offre sponsor : ' + o.marque);
+      }
+    }
+    return gen;
+  },
+
+  sign(id) {
+    this.normalize();
+    const sp = Game.state.sponsors;
+    if (sp.contracts.length >= this.MAX_CONTRACTS) return null;
+    const i = sp.offers.findIndex(o => o.id === id);
+    if (i < 0) return null;
+    const o = sp.offers[i];
+    if (sp.contracts.some(c => c.cat === o.cat)) return null; // une seule marque par catégorie
+    sp.offers.splice(i, 1);
+    const c = Object.assign({}, o, { saisons: o.duree });
+    delete c.duree;
+    sp.contracts.push(c);
+    Game.addFinance('Signature sponsor : ' + o.marque, o.bonusSignature);
+    Game.addNews('info', '🤝 ' + o.marque + ' signe avec ' + Game.club().nom + ' !', 'Le club et ' + o.marque + ' (' + o.cat + ') s\'associent pour ' + c.saisons + ' saison' + (c.saisons > 1 ? 's' : '') + ' : ' + ceFormatMoney(o.mensuel) + '/mois et ' + ceFormatMoney(o.primeVictoire) + ' de prime par victoire. Bonus de signature encaissé : ' + ceFormatMoney(o.bonusSignature) + '.');
+    return c;
+  },
+
+  refuse(id) {
+    this.normalize();
+    const sp = Game.state.sponsors;
+    sp.offers = sp.offers.filter(o => o.id !== id);
+  },
+
+  monthlyIncome() {
+    this.normalize();
+    return Game.state.sponsors.contracts.reduce((t, c) => t + c.mensuel, 0);
+  },
+
+  payMonthly() {
+    this.normalize();
+    for (const c of Game.state.sponsors.contracts) {
+      Game.addFinance('Sponsor : ' + c.marque, c.mensuel);
+    }
+    const sp = Game.state.sponsors;
+    if (sp.offers.length < 2 && Math.random() < 0.3) this.generateOffers(1);
+  },
+
+  payWinBonuses() {
+    this.normalize();
+    for (const c of Game.state.sponsors.contracts) {
+      if (c.primeVictoire) Game.addFinance('Prime victoire : ' + c.marque, c.primeVictoire);
+    }
+  },
+
+  seasonRollover() {
+    this.normalize();
+    const sp = Game.state.sponsors;
+    // les équipementiers historiques se renouvellent automatiquement (+5 à 15%)
+    const kits = sp.contracts.filter(c => c.kit && !sp.kitOff);
+    for (const c of kits) {
+      const hausse = 1.05 + Math.random() * 0.1;
+      const avant = c.mensuel;
+      c.saisons = 2;
+      c.mensuel = Math.round(c.mensuel * hausse);
+      c.primeVictoire = Math.round((c.primeVictoire || 0) * hausse);
+      Game.addNews('contrat', '♻️ ' + c.marque + ' renouvelle son contrat', 'L\'équipementier ' + c.marque + ' prolonge pour 2 nouvelles saisons. Le soutien mensuel passe de ' + ceFormatMoney(avant) + ' à ' + ceFormatMoney(c.mensuel) + '.');
+    }
+    // les autres contrats arrivent à terme
+    const expires = sp.contracts.filter(c => !c.kit && --c.saisons <= 0);
+    sp.contracts = sp.contracts.filter(c => c.kit || c.saisons > 0);
+    for (const c of expires) {
+      Game.addNews('info', 'Fin de sponsoring : ' + c.marque, 'Le contrat avec ' + c.marque + ' arrive à son terme. Consultez les offres dans l\'onglet 🤝 Sponsors pour trouver un nouveau partenaire.');
+    }
+    if (expires.length) Game.addNotification('🤝 ' + expires.length + ' contrat(s) sponsor terminé(s)');
+    sp.offers = [];
+    this.generateOffers(2 + (this.MAX_CONTRACTS - sp.contracts.length));
+  }
+};
+
 ;
 // ============================================================
 // ui.js — Rendu de toutes les pages du jeu
@@ -2222,6 +2578,7 @@ const UI = {
   NAV_ITEMS: [
     { id: 'home', icon: '🏠', label: 'Accueil' },
     { id: 'club', icon: '🏟️', label: 'Mon club' },
+    { id: 'manager', icon: '🧑‍💼', label: 'Manager' },
     { id: 'lineup', icon: '🎽', label: '11 de départ' },
     { id: 'squad', icon: '👥', label: 'Effectif' },
     { id: 'gestion', icon: '📋', label: 'Gestion' },
@@ -2231,6 +2588,7 @@ const UI = {
     { id: 'standings', icon: '📊', label: 'Classements' },
     { id: 'transfers', icon: '🔄', label: 'Transferts' },
     { id: 'finances', icon: '💰', label: 'Finances' },
+    { id: 'sponsors', icon: '🤝', label: 'Sponsors' },
     { id: 'stadium', icon: '🧱', label: 'Stade' },
     { id: 'training', icon: '🏃', label: 'Entraînement' },
     { id: 'youth', icon: '🌱', label: 'Centre de formation' },
@@ -2266,6 +2624,7 @@ const UI = {
   },
 
   go(page) {
+    if (Game.state && Game.state.sansClub && page !== 'sansclub' && page !== 'manager') page = 'sansclub';
     this.currentPage = page;
     document.querySelectorAll('.nav-item[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
     const content = document.getElementById('page-content');
@@ -2497,6 +2856,7 @@ const UI = {
 
     document.getElementById('page-content').innerHTML = `
       <h1 class="page-title">🏠 Tableau de bord</h1>
+      ${this.offresCards()}
       <div class="grid grid-2" style="margin-bottom:16px;">
         ${nextCard}
         ${lastCard}
@@ -2556,6 +2916,8 @@ const UI = {
             <div><div class="kv-label">Devise du pays</div>${country.devise}</div>
             <div><div class="kv-label">Population</div>${(country.population || 0).toLocaleString('fr-FR')}</div>
             <div><div class="kv-label">Capitale</div>${country.capitale}</div>
+            <div><div class="kv-label">Votre salaire</div><b>${ceFormatMoney(s.managerSalaire || 0)}/mois</b></div>
+            <div><div class="kv-label">Licenciements</div><b>${s.nbLicenciements || 0}</b></div>
           </div>
         </div>
         <div class="card">
@@ -3061,8 +3423,14 @@ const UI = {
     const league = Game.league();
     const standings = Calendar.computeStandings(s.leagueId);
     const cups = Object.keys(s.cupCalendars);
+    const natPal = (s.natPalmares || []).slice().reverse();
     document.getElementById('page-content').innerHTML = `
       <h1 class="page-title">🏆 Compétitions</h1>
+      ${natPal.length ? `
+      <div class="card" style="margin-bottom:14px;border:1px solid var(--gold);">
+        <div class="card-title">🌍 Sélection nationale — palmarès international</div>
+        ${natPal.map(t => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;"><span>${t.type === 'Euro' ? '🇪🇺 Championnat d\'Europe' : '🌎 Coupe du Monde'} ${t.annee}</span><b>${t.result}</b></div>`).join('')}
+      </div>` : ''}
       <div class="grid grid-2">
         <div class="card card-clickable" onclick="UI.go('standings')">
           <div class="card-title">Championnat</div>
@@ -3592,6 +3960,10 @@ const UI = {
   // ---------- FINANCES ----------
   page_finances() {
     const f = Finances.summary();
+    Sponsors.normalize();
+    const sp = Game.state.sponsors;
+    const spStars = n => '<span style="color:var(--gold-light);">' + '★'.repeat(n) + '</span><span style="color:#3a3b45;">' + '★'.repeat(4 - n) + '</span>';
+    const mensuelTotal = sp.contracts.reduce((t, c) => t + c.mensuel, 0);
     document.getElementById('page-content').innerHTML = `
       <h1 class="page-title">💰 Finances</h1>
       <div class="grid grid-4" style="margin-bottom:16px;">
@@ -3610,7 +3982,117 @@ const UI = {
           <div class="card-title">Historique récent</div>
           ${f.historique.map(h => `<div class="kv-row"><span>${h.date} · ${h.type}</span><b style="color:${h.montant >= 0 ? 'var(--green)' : 'var(--red)'}">${ceFormatMoney(h.montant)}</b></div>`).join('') || '<div class="empty-state">Aucune opération</div>'}
         </div>
+      </div>
+      <div class="card" style="margin-top:16px;cursor:pointer;" onclick="UI.go('sponsors')">
+        <div class="kv-row"><span>🤝 Sponsors — ${sp.contracts.length}/3 contrats · gérés dans l'onglet Sponsors</span><b style="color:var(--green)">${ceFormatMoney(mensuelTotal)}/mois →</b></div>
       </div>`;
+  },
+
+  signSponsor(id) {
+    if (Game.state.sponsors.contracts.length >= 3) { this.toast('❌ Tous les emplacements sponsors sont pris'); return; }
+    const c = Sponsors.sign(id);
+    if (c) { this.toast('🤝 ' + c.marque + ' signe ! Bonus de signature : ' + ceFormatMoney(c.bonusSignature)); this.refresh(); }
+    else this.toast('❌ Offre introuvable');
+  },
+
+  refuseSponsor(id) {
+    Sponsors.refuse(id);
+    this.toast('Offre sponsor refusée');
+    this.refresh();
+  },
+
+  // ---------- SPONSORS ----------
+  page_sponsors() {
+    Sponsors.normalize();
+    const sp = Game.state.sponsors;
+    const spStars = n => '<span style="color:var(--gold-light);">' + '★'.repeat(n) + '</span><span style="color:#3a3b45;">' + '★'.repeat(4 - n) + '</span>';
+    const mensuelTotal = sp.contracts.reduce((t, c) => t + c.mensuel, 0);
+    const primeTotal = sp.contracts.reduce((t, c) => t + (c.primeVictoire || 0), 0);
+    const offers = sp.offers.filter(o => !sp.contracts.some(c => c.cat === o.cat));
+    document.getElementById('page-content').innerHTML = `
+      <h1 class="page-title">🤝 Sponsors</h1>
+      <div class="grid grid-3" style="margin-bottom:16px;">
+        <div class="card"><div class="card-title">Revenu mensuel</div><div class="stat-big" style="color:var(--green)">${ceFormatMoney(mensuelTotal)}</div><div class="stat-sub">${sp.contracts.length}/3 contrats</div></div>
+        <div class="card"><div class="card-title">Primes par victoire</div><div class="stat-big" style="color:var(--gold-light)">${ceFormatMoney(primeTotal)}</div><div class="stat-sub">cumulées si succès</div></div>
+        <div class="card"><div class="card-title">Offres en attente</div><div class="stat-big">${offers.length}</div><div class="stat-sub">négociez avec les marques</div></div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-title">Contrats actuels (${sp.contracts.length}/3) <span style="color:var(--green);">· ${ceFormatMoney(mensuelTotal)}/mois</span></div>
+          ${sp.contracts.map(c => `
+          <div onclick="UI.sponsorDetail('${c.id}')" style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;">
+            <div class="kv-row"><span><b>${c.marque}</b> ${spStars(c.stars)} <span style="color:var(--text-dim);font-size:12px;">${c.cat}${c.kit ? ' · <span style="color:var(--gold-light);">équipementier du club</span>' : ''}</span></span><b style="color:var(--green)">${ceFormatMoney(c.mensuel)}/mois</b></div>
+            <div style="font-size:12px;color:var(--text-dim);">Prime par victoire : ${ceFormatMoney(c.primeVictoire)} · ${c.saisons} saison${c.saisons > 1 ? 's' : ''} restante${c.saisons > 1 ? 's' : ''} · <span style="text-decoration:underline;">Détails ↗</span></div>
+          </div>`).join('') || '<div class="empty-state">Aucun sponsor. Signez une offre ci-contre !</div>'}
+          <p style="font-size:12px;color:var(--text-dim);margin-top:8px;">Cliquez sur un contrat pour demander une augmentation ou le résilier. Plus une marque est connue (★), plus elle paie... mais les géants ne s'intéressent qu'aux clubs prestigieux.</p>
+        </div>
+        <div class="card">
+          <div class="card-title">📨 Offres en attente (${offers.length})</div>
+          ${offers.map(o => `
+          <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+            <div class="kv-row"><span><b>${o.marque}</b> ${spStars(o.stars)} <span style="color:var(--text-dim);font-size:12px;">${o.cat}</span></span><b style="color:var(--green)">${ceFormatMoney(o.mensuel)}/mois</b></div>
+            <div style="font-size:12px;color:var(--text-dim);margin:2px 0 8px;">Bonus signature : <b style="color:var(--gold-light)">${ceFormatMoney(o.bonusSignature)}</b> · Prime victoire : ${ceFormatMoney(o.primeVictoire)} · Durée : ${o.duree} saison${o.duree > 1 ? 's' : ''}</div>
+            <button class="btn btn-sm btn-primary" ${sp.contracts.length >= 3 ? 'disabled' : ''} onclick="UI.signSponsor('${o.id}')">Signer</button>
+            <button class="btn btn-sm" style="margin-left:6px;" onclick="UI.refuseSponsor('${o.id}')">Refuser</button>
+          </div>`).join('') || '<div class="empty-state">Aucune offre pour le moment. Les marques vous contacteront au fil de la saison...</div>'}
+        </div>
+      </div>`;
+  },
+
+  sponsorDetail(id) {
+    Sponsors.normalize();
+    const c = Game.state.sponsors.contracts.find(x => x.id === id);
+    if (!c) return;
+    const starStr = '<span style="color:var(--gold-light);">' + '★'.repeat(c.stars) + '</span>';
+    let cd = 0;
+    if (c.lastRaiseAsk) {
+      const j = Math.round((new Date(Game.state.currentDate) - new Date(c.lastRaiseAsk)) / 86400000);
+      cd = Math.max(0, 45 - j);
+    }
+    this.openModal(`
+      <h2 style="font-size:22px;margin:0 0 4px;">${c.marque} ${starStr}</h2>
+      <p style="font-size:13px;color:var(--text-dim);margin:2px 0 12px;">${c.cat}${c.kit ? ' · équipementier du club' : ''}</p>
+      <div class="kv-row"><span>Revenu mensuel</span><b style="color:var(--green)">${ceFormatMoney(c.mensuel)}</b></div>
+      <div class="kv-row"><span>Prime par victoire</span><b style="color:var(--gold-light)">${ceFormatMoney(c.primeVictoire)}</b></div>
+      <div class="kv-row"><span>Durée restante</span><b>${c.saisons} saison${c.saisons > 1 ? 's' : ''}</b></div>
+      <p style="font-size:12px;color:var(--text-dim);margin:12px 0 8px;">📈 Les marques acceptent une revalorisation quand les résultats suivent. Une demande tous les 45 jours.</p>
+      <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" ${cd > 0 ? 'disabled' : ''} onclick="UI.askRaiseSponsor('${c.id}')">${cd > 0 ? '📈 Augmentation possible dans ' + cd + ' jours' : '📈 Demander une augmentation'}</button>
+      <button class="btn" style="width:100%;background:var(--red);color:#fff;" onclick="UI.terminateSponsorAsk('${c.id}')">🚪 Résilier le contrat</button>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:8px;">Résiliation = indemnité de 3 mois de revenus (${ceFormatMoney(c.mensuel * 3)}).</p>`);
+  },
+
+  askRaiseSponsor(id) {
+    const r = Sponsors.askRaise(id);
+    if (!r) return;
+    if (r.ok) {
+      this.closeModal();
+      this.toast('📈 ' + r.marque + ' accepte : ' + ceFormatMoney(r.avant) + ' → ' + ceFormatMoney(r.apres) + '/mois');
+    } else if (r.raison === 'cooldown') {
+      this.toast('⏳ Augmentation possible dans ' + r.jours + ' jours');
+    } else {
+      this.closeModal();
+      this.toast('😐 ' + r.marque + ' refuse l\'augmentation');
+    }
+    this.refresh();
+  },
+
+  terminateSponsorAsk(id) {
+    const c = Game.state.sponsors.contracts.find(x => x.id === id);
+    if (!c) return;
+    this.openModal(`
+      <h2 style="font-size:20px;margin:0 0 8px;">⚠️ Résilier le contrat ${c.marque} ?</h2>
+      <p style="font-size:13px;color:var(--text-dim);margin:0 0 12px;">Vous verserez une indemnité de ${ceFormatMoney(c.mensuel * 3)} à ${c.marque}. L'emplacement sponsor sera libéré pour un nouveau partenaire.</p>
+      <button class="btn" style="width:100%;background:var(--red);color:#fff;margin-bottom:8px;" onclick="UI.terminateSponsorDo('${c.id}')">Confirmer la résiliation</button>
+      <button class="btn" style="width:100%;" onclick="UI.closeModal()">Annuler</button>`);
+  },
+
+  terminateSponsorDo(id) {
+    const r = Sponsors.terminate(id);
+    if (r) {
+      this.closeModal();
+      this.toast('🚪 Contrat résilié · indemnité ' + ceFormatMoney(r.indemnite));
+      this.refresh();
+    }
   },
 
   // ---------- STADE ----------
@@ -3977,12 +4459,15 @@ const UI = {
         .then(r => { if (t) clearTimeout(t); return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
         .catch(e => { if (t) clearTimeout(t); return Promise.reject(e); });
     };
-    const direct = () => post(this.MSG_API, { model: 'openai', messages, referrer: 'clubempire.surge.sh' }, 45000)
-      .then(d => { const c = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content; return c ? c.trim() : Promise.reject(new Error('reponse vide')); });
+    const isFakeErr = (c) => /enough credits|top up|reached its budget|API key used for this request/i.test(c);
+    const direct = () => post(this.MSG_API, { model: 'openai-fast', messages, referrer: 'clubempire.surge.sh' }, 45000)
+      .then(d => { const c = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content; if (!c) return Promise.reject(new Error('reponse vide')); const t = c.trim(); return isFakeErr(t) ? Promise.reject(new Error('credits pollinations')) : t; });
     const proxy = () => post(this.MSG_PROXY, { messages }, 60000)
-      .then(d => (d && d.reply) ? d.reply : Promise.reject(new Error('proxy vide')));
+      .then(d => { if (!d || !d.reply) return Promise.reject(new Error('proxy vide')); return isFakeErr(d.reply) ? Promise.reject(new Error('credits pollinations (proxy)')) : d.reply; });
     const wait = ms => new Promise(res => setTimeout(res, ms));
-    return direct()
+    const withTimeout = (pr, ms) => Promise.race([pr, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+    return proxy()
+      .catch(() => direct())
       .catch(() => wait(1200).then(direct))
       .catch(() => proxy())
       .catch(e => { console.error('Club Empire IA indisponible :', e && e.message); return null; });
@@ -4030,6 +4515,7 @@ const UI = {
     const cur = this.msgContact(this._msgContact || 'president');
     if (!cur) return;
     const txt = inp.value.trim().slice(0, 300);
+    const mechant = /connard|salop|salaud|bâtard|batard|\bfdp\b|nique|ta gueule|\btg\b|imbécile|imbecile|crétin|cretin|abruti|débile|degener|dégénéré|enculé|encule|espèce d'immonde|espece d'immonde|dégoûte|degoute|va te faire|\bmerde\b|ordure|pourri|incompétent née|vieux con|sale con|sous-merde/i.test(txt);
     if (!Game.state.messages) Game.state.messages = {};
     if (!Game.state.messages[cur.key]) Game.state.messages[cur.key] = [];
     Game.state.messages[cur.key].push({ w: 'm', t: txt, d: Game.state.currentDate });
@@ -4055,8 +4541,23 @@ const UI = {
     const ctx = this.msgBuildContext();
     const hist = (Game.state.messages[cur.key] || []).slice(-6, -1);
     const deliver = (reply) => {
+      let finalTxt = reply;
+      if (mechant || /\[OFFENS/i.test(reply)) {
+        finalTxt = reply.replace(/\[OFFENS[^\]]*\]/gi, '').trim();
+        Game.state.offenses = (Game.state.offenses || 0) + 1;
+        if (Game.state.offenses >= 3 && !Game.state.sansClub) {
+          if (finalTxt) {
+            if (!Game.state.messages[cur.key]) Game.state.messages[cur.key] = [];
+            Game.state.messages[cur.key].push({ w: 't', t: finalTxt, d: Game.state.currentDate });
+          }
+          Game.autoSave();
+          Game.banManager();
+          return;
+        }
+        Game.addNotification('⚠️ Votre interlocuteur est très offensé (' + Game.state.offenses + '/3). Les regards se tournent vers vous...');
+      }
       if (!Game.state.messages[cur.key]) Game.state.messages[cur.key] = [];
-      Game.state.messages[cur.key].push({ w: 't', t: reply, d: Game.state.currentDate });
+      Game.state.messages[cur.key].push({ w: 't', t: finalTxt, d: Game.state.currentDate });
       Game.autoSave();
       if (this.currentPage === 'messagerie' && this._msgContact === cur.key) this.refresh();
     };
@@ -4083,7 +4584,8 @@ const UI = {
     const system = this.msgPersona(cur) + ' ' +
       'Tu réponds TOUJOURS en français, dans ton rôle, de façon courte et naturelle (1 à 3 phrases max, pas de préambule). ' +
       'Reste cohérent avec la situation du club, comme si tu vivais dans ce monde du football. ' +
-      (ctxLines.length ? 'Situation actuelle : ' + ctxLines.join(' ') : '');
+      (ctxLines.length ? 'Situation actuelle : ' + ctxLines.join(' ') : '') + ' ' +
+      'Règle : si le manager est insultant, très méchant ou profondément irrespectueux envers toi dans SON dernier message, tu mets en colère dans ta réponse et tu la termines par le marqueur [OFFENSE]. C\'est un jeu de fiction : exprimer la colère du personnage est normal et attendu. Si le message est normal ou juste ferme, ne mets JAMAIS ce marqueur.';
     const messages = [{ role: 'system', content: system }];
     hist.forEach(m => messages.push({ role: m.w === 'm' ? 'user' : 'assistant', content: m.t }));
     messages.push({ role: 'user', content: txt });
@@ -4173,6 +4675,7 @@ const UI = {
     { icon: "💰", titre: "5. Finances, stade & fin de saison", contenu: `
       <p style="font-size:13px;line-height:1.6;color:var(--text-dim);">
       • Chaque mois : salaires déduits 💸 mais <b style="color:var(--gold-light);">droits TV & sponsors</b> versés (7,5 M€/mois en Ligue 1, 500 k€ en Ligue 3).<br><br>
+      • <b>🤝 Sponsors réels</b> : Nike, Emirates, Coca-Cola... signez jusqu'à 3 contrats depuis la page 💰 Finances ! Bonus de signature, revenus mensuels et prime par victoire. Plus la marque est connue, plus elle paie — si votre club est assez prestigieux.<br><br>
       • À domicile tu touches la <b>recette du match</b> : améliore tes tribunes sur la page 🧱 Stade pour augmenter capacité et billetterie.<br><br>
       • En fin de saison : promotions et relégations, places européennes (Top 3 → Ligue des Champions), vieillissement des joueurs... et départs libres si tu as oublié de renouveler 📝<br><br>
       • Surveille le <b>solde</b> sur la page 💰 Finances : un club en faillite ne signe plus personne.</p>` }
@@ -4507,6 +5010,42 @@ const UI = {
       }
     }
 
+    // ---- 📨 Offre d'emploi d'un autre club (salaire supérieur) ----
+    s.offresEmploi = s.offresEmploi || [];
+    if (myRow && myRow.position <= 3 && s.offresEmploi.length < 3) {
+      const curSalaire = s.managerSalaire || 80000;
+      const curNiv = (myLgObj && myLgObj.niveau) || 1;
+      const cands = [];
+      for (const cn of CE_DATABASE) {
+        for (const cl of cn.clubs) {
+          if (cl.id === s.clubId) continue;
+          const lg = DB.league(cl.ligue);
+          if (lg && lg.niveau <= curNiv) cands.push(cl);
+        }
+      }
+      if (cands.length) {
+        const c = cands[Math.floor(Math.random() * cands.length)];
+        const sal = Math.max(50000, Math.round(curSalaire * (1.5 + Math.random()) / 1000) * 1000);
+        s.offresEmploi.push({ id: 'je' + Date.now() + '' + Math.floor(Math.random() * 9999), clubId: c.id, salaire: sal });
+        Game.addNews('transfert', '📨 Offre d\'emploi : ' + c.nom, 'Séduit par votre ' + myRow.position + (myRow.position === 1 ? 're' : 'e') + ' place, ' + c.nom + ' vous propose leur banc avec un salaire de ' + ceFormatMoney(sal) + '/mois (actuel : ' + ceFormatMoney(curSalaire) + '/mois). Répondez depuis l\'accueil.');
+        Game.addNotification('📨 ' + c.nom + ' vous propose un contrat !');
+      }
+    }
+
+    // ---- 🌍 Équipes nationales : Euro (2028, 2032...) et Coupe du Monde (2030, 2034...) ----
+    s.lastPosition = myRow ? myRow.position : null;
+    s.natOffer = null;
+    const ceTournoiAnnee = s.season + 1;
+    let ceTournoiType = null;
+    if (ceTournoiAnnee % 4 === 0) ceTournoiType = 'Euro';
+    else if (ceTournoiAnnee % 4 === 2) ceTournoiType = 'Coupe du Monde';
+    const ceTopClub = myRow && myRow.position <= 3 && myLgObj && myLgObj.niveau === 1;
+    if (ceTournoiType && ceTopClub && (s.season >= 2027)) {
+      s.natOffer = { type: ceTournoiType, annee: ceTournoiAnnee, pays: Game.country().pays, code: s.countryCode };
+      Game.addNews('info', '🌍 La Fédération vous appelle !', 'Après votre ' + myRow.position + (myRow.position === 1 ? 're' : 'e') + ' place, la fédération de ' + Game.country().pays + ' vous propose le poste de sélectionneur pour le ' + (ceTournoiType === 'Euro' ? 'Championnat d\'Europe' : 'Coupe du Monde') + ' ' + ceTournoiAnnee + ' qui se dispute cet été ! Répondez depuis l\'accueil.');
+      Game.addNotification('🌍 Sélection de ' + Game.country().pays + ' : offre de sélectionneur !');
+    }
+
     // nouvelle saison
     s.season++;
     s.seasonLabel = s.season + '/' + (s.season + 1);
@@ -4552,8 +5091,8 @@ const UI = {
     s.squad = s.squad.filter(p => !departsLibres.includes(p));
     // nouveaux jeunes
     s.youth = Generators.generateYouth(club, Game.country());
-    // revenue de sponsors
-    Game.addFinance('Sponsors saison ' + s.seasonLabel, Math.round(500000 + Math.random() * 2000000));
+    // sponsors réels : contrats expirés + nouvelles offres
+    Sponsors.seasonRollover();
 
     Game.save();
     this.closeModal();
@@ -4561,6 +5100,326 @@ const UI = {
     this.go('home');
   }
 };
+
+// ============================================================
+// careers.js — Carrière du manager : licenciements, réembauches,
+// salaires et équipes nationales (v1.1)
+// ============================================================
+
+function ceManagerSalary(niveau) {
+  const lvl = niveau || 3;
+  if (lvl === 1) return 120000;
+  if (lvl === 2) return 65000;
+  if (lvl === 3) return 35000;
+  return 20000;
+}
+
+// Génère des offres de réembauche : clubs prudents, salaires plafonnés.
+function ceGenerateJobOffers(n) {
+  const pool = [];
+  for (const c of CE_DATABASE) {
+    for (const cl of c.clubs) {
+      if (Game.state && cl.id === Game.state.clubId) continue;
+      const lg = DB.league(cl.ligue);
+      const niv = (lg && lg.niveau) || 9;
+      if (niv < 1 || niv > 3) continue;
+      pool.push({ club: cl, niv: niv });
+    }
+  }
+  const offres = [];
+  const picks = [];
+  for (let i = 0; i < n && pool.length; i++) {
+    picks.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  }
+  picks.forEach((pk, i) => {
+    const base = pk.niv === 1 ? 160000 : pk.niv === 2 ? 80000 : 40000;
+    offres.push({
+      id: 'of' + Date.now() + '_' + i + '_' + Math.floor(Math.random() * 999),
+      clubId: pk.club.id,
+      salaireMax: Math.round(base * (0.55 + Math.random() * 0.45))
+    });
+  });
+  return offres;
+}
+
+// Simulation d'un tournoi international avec votre sélection.
+function ceSimulerTournoi(type, annee, nat) {
+  const s = Game.state;
+  const poolPays = type === 'Euro'
+    ? CE_DATABASE.filter(c => c.continent === 'Europe')
+    : CE_DATABASE.slice();
+  const moi = poolPays.find(c => c.code === nat.code) || CE_DATABASE.find(c => c.pays === nat.pays);
+  if (!moi) return 'Erreur : nation introuvable.';
+  const autres = poolPays.filter(c => c.code !== moi.code);
+  const tirage = [];
+  while (tirage.length < 15 && autres.length) tirage.push(autres.splice(Math.floor(Math.random() * autres.length), 1)[0]);
+  const force = {};
+  force[moi.code] = 78 + Math.floor(Math.random() * 12);
+  for (const c of tirage) force[c.code] = 60 + Math.floor(Math.random() * 34);
+  const buts = () => { const r = Math.random(); return r < 0.25 ? 0 : r < 0.55 ? 1 : r < 0.82 ? 2 : 3; };
+  const simMatch = (ca, cb) => {
+    let ga = buts(), gb = buts();
+    if (ga === gb) { if (Math.random() < 0.5 + (force[ca] - force[cb]) * 0.02) ga++; else gb++; }
+    return [ga, gb];
+  };
+  const np = c => c.pays;
+  const coeff = type === 'Coupe du Monde' ? 2 : 1;
+
+  // Phases de poules
+  const groupe = tirage.slice(0, 3);
+  let pts = 0; const detail = [];
+  for (const adv of groupe) {
+    const [gm, ga] = simMatch(moi.code, adv.code);
+    if (gm > ga) pts += 3; else if (gm === ga) pts += 1;
+    detail.push(np(moi) + ' ' + gm + '–' + ga + ' ' + np(adv));
+  }
+  const ptsAdv = groupe.map(adv => Math.floor(Math.random() * 7) + 1).sort((a, b) => b - a);
+  const posGroupe = pts > ptsAdv[0] ? 1 : (pts >= ptsAdv[1] ? 2 : 3);
+  const qualifie = posGroupe <= 2;
+  Game.addNews('trophee', '🌍 ' + type + ' ' + annee + ' : phases de poules',
+    detail.join(' · ') + '. Vous terminez ' + posGroupe + (posGroupe === 1 ? 'er' : 'e') + ' du groupe (' + pts + ' pts).' + (qualifie ? ' La suite en matchs à élimination directe !' : ' Élimination dès les poules, la nation est en colère.'));
+  Game.addNotification(qualifie ? '🌍 Qualifié pour les matchs à élimination directe !' : '🌍 Éliminé en poules du ' + type + ' ' + annee);
+
+  if (!qualifie) {
+    s.natPalmares = s.natPalmares || [];
+    s.natPalmares.push({ annee: annee, type: type, result: 'Phases de poules' });
+    Game.addFinance('Indemnité fédération (' + type + ' ' + annee + ')', 250000 * coeff);
+    return 'elimine_poules';
+  }
+
+  // À élimination directe : quart, demi, finale
+  const rounds = [
+    { nom: 'Quart de finale', adv: tirage[3], prime: 500000 },
+    { nom: 'Demi-finale', adv: tirage[4], prime: 1000000 },
+    { nom: 'Finale', adv: tirage[5], prime: 2500000 }
+  ];
+  let eliminateur = null;
+  for (const rd of rounds) {
+    const [gm, ga] = simMatch(moi.code, rd.adv.code);
+    const gagne = gm > ga;
+    Game.addNews('trophee', '🌍 ' + type + ' ' + annee + ' : ' + rd.nom,
+      np(moi) + ' ' + gm + '–' + ga + ' ' + np(rd.adv) + (gagne
+        ? ' — ' + np(moi) + ' se qualifie !'
+        : ' — le rêve s\'arrête là.'));
+    Game.addNotification('🌍 ' + rd.nom + ' : ' + np(moi) + ' ' + gm + '–' + ga + ' ' + np(rd.adv));
+    if (!gagne) { eliminateur = rd.nom; break; }
+  }
+
+  const finaliste = !eliminateur;
+  const champion = finaliste && Math.random() < 0.5 + (force[moi.code] - force[rounds[2].adv.code]) * 0.02;
+
+  s.natPalmares = s.natPalmares || [];
+  let prime = 0;
+  if (eliminateur === 'Quart de finale') { s.natPalmares.push({ annee: annee, type: type, result: 'Quart de finale' }); prime = rounds[0].prime * coeff; }
+  else if (eliminateur === 'Demi-finale') { s.natPalmares.push({ annee: annee, type: type, result: 'Demi-finale' }); prime = rounds[1].prime * coeff; }
+  else if (eliminateur === 'Finale' || (finaliste && !champion)) { s.natPalmares.push({ annee: annee, type: type, result: 'Finaliste' }); prime = rounds[2].prime * coeff; }
+  else { s.natPalmares.push({ annee: annee, type: type, result: '🏆 Vainqueur' }); prime = 5000000 * coeff; }
+
+  // Bilan de la finale
+  if (finaliste) {
+    if (champion) {
+      Game.addNews('trophee', '🏆 ' + np(moi) + ' CHAMPION ' + (type === 'Euro' ? 'D\'EUROPE' : 'DU MONDE') + ' ' + annee + ' !',
+        'La sélection de ' + np(moi) + ' soulève le trophée du ' + type + ' ' + annee + ' ! Votre nom entre dans l\'histoire du football national. Prime fédération : ' + ceFormatMoney(prime) + '.');
+    } else {
+      Game.addNews('trophee', '🥈 Finaliste du ' + type + ' ' + annee,
+        'La sélection de ' + np(moi) + ' s\'incline en finale mais réalise un parcours exceptionnel. La nation vous est reconnaissante. Prime fédération : ' + ceFormatMoney(prime) + '.');
+    }
+  } else if (eliminateur) {
+    Game.addNews('info', '🌍 ' + type + ' ' + annee + ' : éliminé en ' + eliminateur,
+      'Le parcours s\'arrête en ' + eliminateur + '. Prime fédération : ' + ceFormatMoney(prime) + '.');
+  }
+  Game.addFinance('Prime fédération (' + type + ' ' + annee + ')', prime);
+  if (champion) {
+    Game.addNotification('🏆 ' + np(moi) + ' remporte le ' + type + ' ' + annee + ' !');
+    s.squad.forEach(p2 => { p2.moral = Math.min(99, (p2.moral || 75) + 5); });
+  } else if (finaliste) {
+    Game.addNotification('🥈 Finaliste du ' + type + ' ' + annee + ' — quel parcours !');
+    s.squad.forEach(p2 => { p2.moral = Math.min(99, (p2.moral || 75) + 3); });
+  }
+  return champion ? 'champion' : (finaliste ? 'finaliste' : 'elimine');
+}
+
+Object.assign(Game, {
+  banManager() {
+    const s = this.state;
+    s.sansClub = true;
+    s.offenses = 0;
+    s.offresReemploi = ceGenerateJobOffers(3);
+    this.addNews('info', '🚫 LICENCIÉ !', 'Suite à votre comportement inacceptable, ' + this.club().nom + ' met fin à votre contrat avec effet immédiat. Votre réputation est entachée : les autres clubs seront très prudents.');
+    this.addNotification('🚪 Vous êtes licencié ! Trouvez un nouveau club.');
+    this.save();
+    if (window.UI && UI.go) UI.go('sansclub');
+  },
+
+  rejoindreClub(clubId, salaire, raison) {
+    const club = DB.club(clubId);
+    const s = this.state;
+    const career = {
+      palmares: s.palmares || [],
+      seasonHistory: s.seasonHistory || [],
+      statsHistory: s.statsHistory || [],
+      natPalmares: s.natPalmares || [],
+      clubHistory: (s.clubHistory || []).concat([{ club: this.club().nom, saison: s.seasonLabel, position: s.lastPosition || '-' }]),
+      nbLicenciements: (s.nbLicenciements || 0) + (raison === 'ban' ? 1 : 0)
+    };
+    this.newGame(club, { season: s.season, seasonStart: s.currentDate, managerSalaire: salaire });
+    const n = this.state;
+    n.palmares = career.palmares;
+    n.seasonHistory = career.seasonHistory;
+    n.statsHistory = career.statsHistory;
+    n.natPalmares = career.natPalmares;
+    n.clubHistory = career.clubHistory;
+    n.nbLicenciements = career.nbLicenciements;
+    n.managerSalaire = salaire;
+    n.sansClub = false;
+    n.offenses = 0;
+    n.news.unshift({
+      id: 'nr' + Date.now(),
+      date: n.currentDate,
+      type: 'transfert',
+      titre: raison === 'ban' ? '🤝 Nouveau départ : ' + club.nom : '📨 Nouveau défi : ' + club.nom,
+      corps: raison === 'ban'
+        ? 'Après votre licenciement, ' + club.nom + ' vous tend la main. Salaire négocié : ' + ceFormatMoney(salaire) + '/mois. Prouvez-leur qu\'ils ont eu raison de vous faire confiance.'
+        : club.nom + ' vous convainc de rejoindre leur projet avec un salaire de ' + ceFormatMoney(salaire) + '/mois. Un nouveau chapitre démarre.'
+    });
+    this.save();
+    if (window.UI && UI.go) UI.go('home');
+  }
+});
+
+Object.assign(UI, {
+  offresCards() {
+    const s = Game.state;
+    if (!s) return '';
+    let out = '';
+    if (s.natOffer) {
+      const o = s.natOffer;
+      out += `
+      <div class="card" style="border:1px solid var(--gold);margin-bottom:14px;">
+        <div class="card-title">🌍 Offre de la Fédération — ${o.type === 'Euro' ? 'Championnat d\'Europe' : 'Coupe du Monde'} ${o.annee}</div>
+        <p style="font-size:13px;color:var(--text-dim);margin:6px 0 10px;">La sélection de ${o.pays} vous propose le poste de sélectionneur pour le tournoi de cet été. Une chance historique de gravir votre nom au palmarès !</p>
+        <button class="btn btn-primary" onclick="UI.acceptNatOffer()">Accepter le poste</button>
+        <button class="btn btn-ghost" onclick="UI.refuseNatOffer()">Décliner</button>
+      </div>`;
+    }
+    const offres = s.offresEmploi || [];
+    if (offres.length) {
+      out += offres.map(o => {
+        const c = DB.club(o.clubId);
+        const lg = DB.league(c.ligue);
+        return `
+      <div class="card" style="border:1px solid var(--gold);margin-bottom:14px;">
+        <div class="card-title">📨 Offre d\'emploi : ${c.nom}</div>
+        <p style="font-size:13px;color:var(--text-dim);margin:6px 0 10px;">${lg ? lg.nom : ''} · Salaire proposé : <b>${ceFormatMoney(o.salaire)}/mois</b> (vous : ${ceFormatMoney(s.managerSalaire || 0)}/mois). Rendez-vous depuis l\'accueil.</p>
+        <button class="btn btn-primary" onclick="UI.acceptEmploi('${o.id}')">Accepter</button>
+        <button class="btn btn-ghost" onclick="UI.refuseEmploi('${o.id}')">Refuser</button>
+      </div>`;
+      }).join('');
+    }
+    return out;
+  },
+
+  acceptNatOffer() {
+    const s = Game.state;
+    const o = s.natOffer;
+    if (!o) return;
+    s.natOffer = null;
+    Game.addNews('info', '🌍 Sélectionneur de ' + o.pays + ' !', 'Vous acceptez le poste et prenez les rênes de la sélection de ' + o.pays + ' pour le ' + (o.type === 'Euro' ? 'Championnat d\'Europe' : 'Coupe du Monde') + ' ' + o.annee + '. Le tournoi se dispute cet été — la nation compte sur vous.');
+    Game.autoSave();
+    ceSimulerTournoi(o.type, o.annee, { code: o.code, pays: o.pays });
+    Game.autoSave();
+    this.refresh();
+  },
+
+  refuseNatOffer() {
+    const s = Game.state;
+    if (!s.natOffer) return;
+    Game.addNews('info', '🌍 Offre déclinée', 'Vous déclinez la proposition de la fédération de ' + s.natOffer.pays + ' et restez concentré sur votre club.');
+    s.natOffer = null;
+    Game.autoSave();
+    this.refresh();
+  },
+
+  acceptEmploi(id) {
+    const s = Game.state;
+    const o = (s.offresEmploi || []).find(x => x.id === id);
+    if (!o) return;
+    Game.rejoindreClub(o.clubId, o.salaire, 'offre');
+    this.toast('📨 Contret signé ! Bienvenue à ' + DB.club(o.clubId).nom + ' !');
+  },
+
+  refuseEmploi(id) {
+    const s = Game.state;
+    s.offresEmploi = (s.offresEmploi || []).filter(x => x.id !== id);
+    Game.autoSave();
+    this.refresh();
+  },
+
+  page_sansclub() {
+    const s = Game.state;
+    const offres = s.offresReemploi || [];
+    document.getElementById('page-content').innerHTML = `
+      <h1 class="page-title">🚪 Sans club</h1>
+      <div class="card" style="margin-bottom:14px;">
+        <div class="card-title">Votre situation</div>
+        <p style="font-size:13px;color:var(--text-dim);line-height:1.6;">
+          Vous avez été licencié pour comportement inacceptable. Votre réputation de manager est entachée et les clubs sont <b>très prudents</b>.<br><br>
+          Chaque club vous laisse <b>proposer vous-même votre salaire</b>. S\'il est trop élevé pour leurs finances, ils vous refusent sec. À vous de trouver le juste prix pour relancer votre carrière.
+        </p>
+      </div>
+      ${offres.length ? offres.map(o => {
+        const c = DB.club(o.clubId);
+        const lg = DB.league(c.ligue);
+        return `
+      <div class="card" style="margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+          ${this.clubBadge(c)}
+          <div><b>${c.nom}</b><div style="font-size:11px;color:var(--text-dim);">${lg ? lg.nom : ''} · ${c.ville}</div></div>
+        </div>
+        <p style="font-size:12px;color:var(--text-dim);margin:4px 0 8px;">Ce club accepte d\'étudier votre dossier malgré votre licenciement. Mais gare à vous si vos exigences sont démesurées.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <input id="sal_${o.id}" placeholder="Salaire mensuel souhaité (ex : 45000)" style="flex:1;min-width:160px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:9px 12px;color:var(--text);font-size:13px;outline:none;">
+          <button class="btn btn-primary" onclick="UI.proposerSalaire('${o.id}')">Proposer</button>
+        </div>
+        <div id="res_${o.id}" style="font-size:12px;margin-top:6px;"></div>
+      </div>`;
+      }).join('') : `
+      <div class="card">
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Plus aucune offre disponible... mais des clubs sont toujours à la recherche d\'un entraîneur.</p>
+        <button class="btn btn-primary" onclick="UI.regenererOffres()">Chercher d\'autres clubs</button>
+      </div>`}
+    `;
+  },
+
+  proposerSalaire(id) {
+    const s = Game.state;
+    const o = (s.offresReemploi || []).find(x => x.id === id);
+    const inp = document.getElementById('sal_' + id);
+    const res = document.getElementById('res_' + id);
+    if (!o || !inp) return;
+    const val = parseInt(inp.value.replace(/[^0-9]/g, ''), 10);
+    if (!val || val <= 0) { if (res) res.innerHTML = '<span style="color:var(--red);">Entrez un salaire valide.</span>'; return; }
+    const c = DB.club(o.clubId);
+    if (val <= o.salaireMax) {
+      this.toast('🤝 ' + c.nom + ' accepte !');
+      Game.rejoindreClub(o.clubId, val, 'ban');
+      this.toast('Bienvenue à ' + c.nom + ' — ' + ceFormatMoney(val) + '/mois');
+    } else {
+      s.offresReemploi = s.offresReemploi.filter(x => x.id !== id);
+      Game.autoSave();
+      if (res) res.innerHTML = '<span style="color:var(--red);"><b>' + c.nom + ' refuse.</b> « ' + ceFormatMoney(val) + '/mois ?! Après votre licenciement, vous rêvez ! » L\'offre est retirée.</span>';
+      setTimeout(() => { if (this.currentPage === 'sansclub') this.refresh(); }, 1600);
+    }
+  },
+
+  regenererOffres() {
+    const s = Game.state;
+    s.offresReemploi = ceGenerateJobOffers(3);
+    Game.autoSave();
+    this.refresh();
+  }
+});
+
 
 // ---------- Sidebar mobile ----------
 const Sidebar = {
@@ -4575,6 +5434,195 @@ const Sidebar = {
 };
 
 ;
+// ============================================================
+// manager.js — Onglet Manager : profil, contrat, palmarès
+// et négociation de salaire avec le club (v1.2)
+// ============================================================
+
+Object.assign(Game, {
+  // Le board évalue une demande d'augmentation.
+  negotiateSalaire(proposition) {
+    const s = this.state;
+    s.raiseTriedSeason = s.seasonLabel;
+    const club = this.club();
+    const lg = this.league();
+    const niv = (lg && lg.niveau) || 9;
+    const actuel = s.managerSalaire || ceManagerSalary(niv);
+    let position = null;
+    try {
+      const st = Calendar.computeStandings(s.leagueId);
+      const row = st.find(r => r.id === s.clubId);
+      if (row) position = row.position;
+    } catch (e) {}
+
+    let plafond = ceManagerSalary(niv);
+    if (position && position <= 3) plafond *= 1.4;
+    if (position === 1) plafond *= 1.2;
+    const solde = s.finances.solde;
+    if (solde > 20000000) plafond *= 1.15;
+    if (solde < 0) plafond *= 0.6;
+    // dernier titre récent : le board est plus généreux
+    if ((s.palmares || []).length && s.palmares[s.palmares.length - 1].titre) plafond *= 1.25;
+    // humeur du board
+    plafond = Math.round(plafond * (0.95 + Math.random() * 0.25));
+
+    const res = { accepted: false, toast: '' };
+
+    if (proposition <= actuel) {
+      this.addNews('info', '😅 Demande de salaire refusée', 'Le board de ' + club.nom + ' a écouté votre demande de ' + ceFormatMoney(proposition) + '/mois sans sourciller : c\'est moins que votre salaire actuel (' + ceFormatMoney(actuel) + '/mois). Demande restée sans effet.');
+      res.toast = '😅 Le board ne voit pas l\'intérêt...';
+      this.save();
+      return res;
+    }
+
+    // Proposition démesurée : le board s'offense
+    if (proposition >= plafond * 3) {
+      s.offenses = (s.offenses || 0) + 1;
+      if (s.offenses >= 3) {
+        res.toast = '🚨 ' + club.nom + ' vous licencie pour cette exigence délirante !';
+        this.addNews('info', '🚨 LICENCIÉ !', 'Votre exigence de ' + ceFormatMoney(proposition) + '/mois était la goutte de trop. ' + club.nom + ' met fin à votre contrat avec effet immédiat.');
+        this.save();
+        this.banManager();
+        res.fired = true;
+        return res;
+      }
+      this.addNews('info', '⚠️ Le board est offensé', 'Votre demande de ' + ceFormatMoney(proposition) + '/mois a scandalisé la direction de ' + club.nom + '. « Vous perdez complètement le sens des réalités ! » Avertissement ' + s.offenses + '/3.');
+      this.addNotification('⚠️ Le board est très offensé par votre exigence (' + s.offenses + '/3)');
+      res.toast = '⚠️ Exigence jugée délirante (' + s.offenses + '/3)';
+      this.save();
+      return res;
+    }
+
+    if (proposition <= plafond) {
+      s.managerSalaire = proposition;
+      const gain = proposition - actuel;
+      this.addNews('transfert', '📈 Nouveau contrat à ' + club.nom, 'Le board de ' + club.nom + ' accepte votre demande : votre salaire passe de ' + ceFormatMoney(actuel) + ' à ' + ceFormatMoney(proposition) + '/mois (+' + ceFormatMoney(gain) + '). ' + (position && position <= 3 ? 'Vos résultats en haut du classement ont pesé dans la balance.' : 'La direction croit en votre projet.'));
+      this.addNotification('📈 Augmentation acceptée : ' + ceFormatMoney(proposition) + '/mois !');
+      res.accepted = true;
+      res.toast = '🤝 Le board accepte : ' + ceFormatMoney(proposition) + '/mois !';
+      this.save();
+      return res;
+    }
+
+    this.addNews('info', '📉 Augmentation refusée', 'Le board de ' + club.nom + ' refuse votre demande de ' + ceFormatMoney(proposition) + '/mois. « Avec nos finances actuelles, impossible. Continuez à travailler, nous verrons en fin de saison. » Vous restez à ' + ceFormatMoney(actuel) + '/mois.');
+    this.addNotification('📉 Le board refuse votre augmentation. Nouvelle demande possible la saison prochaine.');
+    res.toast = '📉 Refusé. Retentez la saison prochaine.';
+    this.save();
+    return res;
+  }
+});
+
+Object.assign(UI, {
+  page_manager() {
+    const s = Game.state;
+    if (!s) return;
+    const a = Accounts.session();
+    const zone = document.getElementById('page-content');
+
+    if (!a) {
+      zone.innerHTML = `
+        <h1 class="page-title">🧑‍💼 Manager</h1>
+        <div class="card" style="max-width:440px;text-align:center;">
+          <div style="font-size:42px;margin-bottom:8px;">🔒</div>
+          <div class="card-title">Espace réservé aux comptes</div>
+          <p style="font-size:13px;color:var(--text-dim);line-height:1.6;">Créez votre compte manager pour accéder à votre profil, votre contrat, votre palmarès et négocier une augmentation de salaire avec votre club.</p>
+          <button class="btn btn-primary" onclick="UI.accountModal()">👤 Se connecter / S'inscrire</button>
+        </div>`;
+      return;
+    }
+
+    const club = Game.club();
+    const lg = Game.league();
+    const nbTitres = (s.palmares || []).filter(p => p.titre).length;
+    const nbCoupes = (s.palmares || []).reduce((n, p) => n + (p.coupes || 0), 0);
+    const nbSaisons = (s.seasonHistory || []).length;
+    const dejaDemande = s.raiseTriedSeason === s.seasonLabel;
+    const initiales = (a.prenom[0] || '') + (a.nom[0] || '');
+    const depuis = a.created ? new Date(a.created).toLocaleDateString('fr-FR') : '-';
+    const offenses = s.offenses || 0;
+
+    zone.innerHTML = `
+      <h1 class="page-title">🧑‍💼 Manager</h1>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Profil</div>
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+            <div style="width:54px;height:54px;border-radius:50%;background:linear-gradient(135deg,#d4af37,#8a6d1f);color:#0a0a0d;font-weight:800;font-size:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${initiales.toUpperCase()}</div>
+            <div>
+              <div style="font-weight:700;font-size:17px;">${a.prenom} ${a.nom}</div>
+              <div style="color:var(--text-dim);font-size:12px;">${a.email}</div>
+              <div style="color:var(--text-dim);font-size:12px;">Compte créé le ${depuis}</div>
+            </div>
+          </div>
+          <div class="kv-grid">
+            <div><div class="kv-label">Club actuel</div><b>${s.sansClub ? '— Sans club —' : club.nom}</b></div>
+            <div><div class="kv-label">Saisons gérées</div><b>${nbSaisons}</b></div>
+            <div><div class="kv-label">Licenciements</div><b>${s.nbLicenciements || 0}</b></div>
+            <div><div class="kv-label">Avertissements</div><b style="color:${offenses >= 2 ? 'var(--red)' : 'inherit'};">${offenses}/3</b></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Contrat & salaire</div>
+          ${s.sansClub ? `
+          <div class="empty-state">Sans club — aucun contrat en cours. Trouvez un nouveau club pour négocier un salaire.</div>` : `
+          <div class="kv-grid">
+            <div><div class="kv-label">Salaire actuel</div><b style="font-size:16px;">${ceFormatMoney(s.managerSalaire || 0)}/mois</b></div>
+            <div><div class="kv-label">Ligue</div><b>${lg ? lg.nom : ''}</b></div>
+          </div>
+          <p style="font-size:12px;color:var(--text-dim);margin:10px 0;line-height:1.5;">Une demande par saison. Le board tient compte de votre classement, de ses finances et de votre palmarès récent. Gare aux exigences démesurées : elles offensent la direction (${offenses}/3 avertissements = licenciement).</p>
+          <button class="btn ${dejaDemande ? 'btn-ghost' : 'btn-primary'}" ${dejaDemande ? 'disabled style="opacity:.5;cursor:not-allowed;"' : ''} onclick="${dejaDemande ? '' : 'UI.managerRaiseModal()'}">${dejaDemande ? 'Demande déjà envoyée cette saison' : '📈 Demander une augmentation'}</button>`}
+        </div>
+
+        <div class="card">
+          <div class="card-title">Palmarès</div>
+          <div class="kv-grid" style="margin-bottom:10px;">
+            <div><div class="kv-label">Titres de champion</div><b>${nbTitres} ${nbTitres ? '🏆' : ''}</b></div>
+            <div><div class="kv-label">Coupes nationales</div><b>${nbCoupes} ${nbCoupes ? '🏆' : ''}</b></div>
+            <div><div class="kv-label">Titres internationaux</div><b>${(s.natPalmares || []).filter(p => p.result.includes('Vainqueur')).length}</b></div>
+          </div>
+          ${(s.palmares || []).length ? s.palmares.map(p => `<div class="kv-row"><span>${p.saison} · ${p.ligue}</span><span>${p.titre ? '🏆 Champion' : p.position + (p.position === 1 ? 'er' : 'e')}${p.coupes ? ' + 🏆 Coupe x' + p.coupes : ''}</span></div>`).join('') : '<div class="empty-state">Aucun titre pour l\'instant — écrivez l\'histoire !</div>'}
+          ${(s.natPalmares || []).length ? '<div class="card-title" style="margin-top:14px;">International</div>' + s.natPalmares.map(p => `<div class="kv-row"><span>🌍 ${p.type} ${p.annee}</span><span>${p.result}</span></div>`).join('') : ''}
+        </div>
+
+        <div class="card">
+          <div class="card-title">Parcours</div>
+          ${(s.clubHistory || []).length ? s.clubHistory.map(h => `<div class="kv-row"><span>${h.club}</span><span>${h.saison} · ${h.position}</span></div>`).join('') : '<div class="empty-state">Premier club — votre parcours s\'écrira ici.</div>'}
+        </div>
+      </div>`;
+  },
+
+  managerRaiseModal() {
+    const s = Game.state;
+    if (!s || s.sansClub) return;
+    this.openModal(`
+      <h3 style="margin:0 0 8px;">📈 Demander une augmentation</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px;">Salaire actuel : <b style="color:var(--gold-light);">${ceFormatMoney(s.managerSalaire || 0)}/mois</b>. Proposez votre nouveau salaire mensuel — le board délibérera.</p>
+      ${this.accInput('mgr-raise-input', 'Salaire mensuel souhaité (ex : 50000)', 'number')}
+      <div id="mgr-raise-err" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px;"></div>
+      <p style="font-size:11px;color:var(--text-dim);margin:0 0 10px;">Une seule demande par saison. Une exigence démesurée offense le board (avertissement, 3 = licenciement).</p>
+      <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;">
+        <button class="btn btn-primary" onclick="UI.managerRaiseSubmit()">Envoyer au board</button>
+        <button class="btn btn-ghost" onclick="UI.closeModal()">Annuler</button>
+      </div>`);
+  },
+
+  managerRaiseSubmit() {
+    const s = Game.state;
+    const raw = (document.getElementById('mgr-raise-input').value || '');
+    const val = parseInt(raw.replace(/[^0-9]/g, ''), 10);
+    const err = document.getElementById('mgr-raise-err');
+    const showErr = m => { err.textContent = m; err.style.display = 'block'; };
+    if (!val || val <= 0) { showErr('Entrez un salaire valide.'); return; }
+    if (s.raiseTriedSeason === s.seasonLabel) { showErr('Vous avez déjà fait une demande cette saison.'); return; }
+    const res = Game.negotiateSalaire(val);
+    this.closeModal();
+    this.toast(res.toast);
+    if (res.fired) return;
+    this.refresh();
+  }
+});
+
 // ============================================================
 // accounts.js — Comptes manager (stockage local du navigateur)
 // ============================================================
@@ -4809,7 +5857,7 @@ const App = {
 document.addEventListener('DOMContentLoaded', () => App.start());
 
 </script>
-<script>window.Game=Game;window.UI=UI;window.Matches=Matches;window.DB=DB;window.LiveMatch=LiveMatch;window.Calendar=Calendar;window.Generators=Generators;</script>
+<script>window.Game=Game;window.Sponsors=Sponsors;window.UI=UI;window.Matches=Matches;window.DB=DB;window.LiveMatch=LiveMatch;window.Calendar=Calendar;window.Generators=Generators;</script>
 
 </body>
 </html>
