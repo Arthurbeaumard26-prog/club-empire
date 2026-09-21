@@ -311,7 +311,7 @@ tr.row-self{background:rgba(212,175,55,.08);}
       <button id="btn-new-game" class="btn btn-primary btn-large">Commencer</button>
       <button id="btn-continue" class="btn btn-secondary btn-large" style="display:none;">📂 Charger une partie</button>
     </div>
-    <p class="launch-version">v1.4 — Onglet Sponsors : équipementiers réels, négociation d'augmentation, résiliation · Carrière & équipes nationales · Messagerie IA</p>
+    <p class="launch-version">v1.3 — Sponsors réels : équipementiers par club, onglet dédié, négociation d'augmentation, résiliation · Carrière & équipes nationales · Messagerie IA</p>
   </div>
 </div>
 
@@ -2298,7 +2298,7 @@ const SPONSOR_BRANDS = [
 ];
 
 
-// ---------- Équipementiers réels (v1.4) ----------
+// ---------- Équipementiers réels (v1.3) ----------
 const CLUB_KITS = {
   // Espagne
   'Real Madrid': 'Adidas', 'FC Barcelone': 'Nike', 'Atlético Madrid': 'Nike', 'Sevilla': 'Nike',
@@ -2359,7 +2359,7 @@ const Sponsors = {
     if (!s.sponsors || typeof s.sponsors !== 'object') s.sponsors = { contracts: [], offers: [] };
     if (!Array.isArray(s.sponsors.contracts)) s.sponsors.contracts = [];
     if (!Array.isArray(s.sponsors.offers)) s.sponsors.offers = [];
-    // v1.4 : équipementier réel du club dès le premier lancement / changement de club
+    // v1.3 : équipementier réel du club dès le premier lancement / changement de club
     if (!s.sponsors.kitDone) {
       s.sponsors.kitDone = true;
       if (!s.sponsors.kitOff && !s.sponsors.contracts.some(c => c.cat === 'Équipementier')) this.assignKit();
